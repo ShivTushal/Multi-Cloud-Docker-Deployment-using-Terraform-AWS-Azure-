@@ -1,81 +1,81 @@
 terraform {
   required_providers {
+
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 6.0"
+      version = "~> 5.50"
     }
 
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0"
+      version = "~> 4.0"
     }
   }
 }
 
 # =====================================================
-# PROVIDERS
+# VARIABLES
+# =====================================================
+
+variable "docker_username" {
+  type        = string
+  description = "Docker Hub Username"
+  sensitive   = true
+}
+
+variable "docker_password" {
+  type        = string
+  description = "Docker Hub Password"
+  sensitive   = true
+}
+
+# =====================================================
+# AWS PROVIDER
 # =====================================================
 
 provider "aws" {
   region = "ap-south-1"
 }
 
+# =====================================================
+# AZURE PROVIDER
+# =====================================================
+
 provider "azurerm" {
+
   features {
     resource_group {
       prevent_deletion_if_contains_resources = false
     }
   }
-
-  skip_provider_registration = true
 }
 
 # =====================================================
-# GET LATEST UBUNTU AMI
-# =====================================================
-
-data "aws_ami" "ubuntu" {
-  most_recent = true
-
-  owners = ["099720109477"]
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
-
-# =====================================================
-# AWS VPC
+# VPC
 # =====================================================
 
 resource "aws_vpc" "main_vpc" {
   cidr_block = "10.0.0.0/16"
 
   tags = {
-    Name = "aws-main-vpc"
+    Name = "main-vpc"
   }
 }
 
 # =====================================================
-# AWS INTERNET GATEWAY
+# INTERNET GATEWAY
 # =====================================================
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main_vpc.id
 
   tags = {
-    Name = "aws-igw"
+    Name = "main-igw"
   }
 }
 
 # =====================================================
-# AWS SUBNET
+# PUBLIC SUBNET
 # =====================================================
 
 resource "aws_subnet" "public_subnet" {
@@ -85,12 +85,12 @@ resource "aws_subnet" "public_subnet" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "aws-public-subnet"
+    Name = "public-subnet"
   }
 }
 
 # =====================================================
-# AWS ROUTE TABLE
+# ROUTE TABLE
 # =====================================================
 
 resource "aws_route_table" "public_rt" {
@@ -102,63 +102,132 @@ resource "aws_route_table" "public_rt" {
   }
 
   tags = {
-    Name = "aws-public-route-table"
+    Name = "public-rt"
   }
 }
 
-# =====================================================
-# ROUTE TABLE ASSOCIATION
-# =====================================================
-
-resource "aws_route_table_association" "rta" {
+resource "aws_route_table_association" "public_assoc" {
   subnet_id      = aws_subnet.public_subnet.id
   route_table_id = aws_route_table.public_rt.id
 }
 
 # =====================================================
-# AWS SECURITY GROUP
+# SECURITY GROUP
 # =====================================================
 
 resource "aws_security_group" "web_sg" {
-  name        = "aws-web-sg"
-  description = "Allow SSH and Flask App"
+  name        = "web-sg"
+  description = "Allow SSH and Flask"
   vpc_id      = aws_vpc.main_vpc.id
 
   ingress {
     description = "SSH"
-
-    from_port = 22
-    to_port   = 22
-    protocol  = "tcp"
-
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
     description = "Flask App"
-
-    from_port = 5000
-    to_port   = 5000
-    protocol  = "tcp"
-
+    from_port   = 5000
+    to_port     = 5000
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
-    from_port = 0
-    to_port   = 0
-    protocol  = "-1"
-
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   tags = {
-    Name = "aws-web-sg"
+    Name = "web-sg"
   }
 }
 
 # =====================================================
-# AWS EC2
+# UBUNTU AMI
+# =====================================================
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+
+  owners = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# =====================================================
+# IAM ROLE
+# =====================================================
+
+resource "aws_iam_role" "ec2_secrets_role" {
+  name = "ec2-secrets-role-v2"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+# =====================================================
+# IAM POLICY
+# =====================================================
+
+resource "aws_iam_role_policy" "secrets_policy" {
+  name = "secrets-policy"
+  role = aws_iam_role.ec2_secrets_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+
+        Resource = "arn:aws:secretsmanager:ap-south-1:*:secret:docker*"
+      }
+    ]
+  })
+}
+
+# =====================================================
+# INSTANCE PROFILE
+# =====================================================
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "ec2-secrets-profile-v2"
+  role = aws_iam_role.ec2_secrets_role.name
+}
+
+# =====================================================
+# EC2 INSTANCE
 # =====================================================
 
 resource "aws_instance" "docker_server" {
@@ -170,29 +239,57 @@ resource "aws_instance" "docker_server" {
   vpc_security_group_ids      = [aws_security_group.web_sg.id]
   associate_public_ip_address = true
 
-  user_data_replace_on_change = true
-
-  tags = {
-    Name = "aws-docker-server"
-  }
+  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
 
   user_data = <<-EOF
-#!/bin/bash
+              #!/bin/bash
 
-apt update -y
+              apt update -y
 
-apt install docker.io -y
+              apt install -y \
+                awscli \
+                docker.io \
+                jq \
+                python3-pip
 
-systemctl start docker
-systemctl enable docker
+              systemctl start docker
+              systemctl enable docker
 
-echo "@GOODgod97" | docker login -u shivtushal --password-stdin
+              SECRET=$(aws secretsmanager get-secret-value \
+                --secret-id docker \
+                --region ap-south-1 \
+                --query SecretString \
+                --output text)
 
-docker pull shivtushal/git-lab:python-app-1.0
+              echo "$SECRET" > /home/ubuntu/docker-secret.json
 
-docker run -d -p 5000:5000 shivtushal/git-lab:python-app-1.0
+              DOCKER_USERNAME=$(echo $SECRET | jq -r '.user_name')
+              DOCKER_PASSWORD=$(echo $SECRET | jq -r '.user_pass')
+              DOCKER_IMAGE="shivtushal/git-lab:python-app-1.0"
 
-EOF
+              echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+
+              docker pull $DOCKER_IMAGE
+
+              docker run -d -p 5000:5000 $DOCKER_IMAGE
+
+              EOF
+
+  tags = {
+    Name = "docker-server"
+  }
+}
+
+# =====================================================
+# AWS OUTPUTS
+# =====================================================
+
+output "aws_public_ip" {
+  value = aws_instance.docker_server.public_ip
+}
+
+output "aws_instance_id" {
+  value = aws_instance.docker_server.id
 }
 
 # =====================================================
@@ -335,7 +432,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
 
   disable_password_authentication = false
 
-  admin_password = "Azure@123456"
+  admin_password = "CHANGE_ME"
 
   os_disk {
     caching              = "ReadWrite"
@@ -359,7 +456,7 @@ apt install docker.io -y
 systemctl start docker
 systemctl enable docker
 
-echo "@GOODgod97" | docker login -u shivtushal --password-stdin
+echo "${var.docker_password}" | docker login -u ${var.docker_username} --password-stdin
 
 docker pull shivtushal/git-lab:python-app-1.0
 
@@ -370,12 +467,8 @@ EOF
 }
 
 # =====================================================
-# OUTPUTS
+# AZURE OUTPUTS
 # =====================================================
-
-output "aws_public_ip" {
-  value = aws_instance.docker_server.public_ip
-}
 
 output "azure_public_ip" {
   value = azurerm_public_ip.public_ip.ip_address
